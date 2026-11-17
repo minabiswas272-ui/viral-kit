@@ -1,0 +1,203 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable zero-trust primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidLanguage(lang) {
+      return lang in ['English', 'Hinglish', 'Bengali'];
+    }
+
+    function isValidPlatform(platform) {
+      return platform in ['Instagram Reels', 'YouTube Shorts', 'Facebook Reels', 'All Short-Form'];
+    }
+
+    function isValidCreatorProfile(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 160)) &&
+             data.preferredLanguage is string && isValidLanguage(data.preferredLanguage) &&
+             data.preferredPlatform is string && isValidPlatform(data.preferredPlatform) &&
+             (!('fcmToken' in data) || (data.fcmToken is string && data.fcmToken.size() <= 512)) &&
+             (!('fcmNicheTopic' in data) || (data.fcmNicheTopic is string && data.fcmNicheTopic.size() <= 120)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidViralGrowthKit(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+             data.mediaLabel is string && data.mediaLabel.size() <= 120 &&
+             data.mediaKind in ['video', 'audio', 'text'] &&
+             data.language is string && isValidLanguage(data.language) &&
+             data.platform is string && isValidPlatform(data.platform) &&
+             data.modelUsed is string && data.modelUsed.size() >= 1 && data.modelUsed.size() <= 64 &&
+             data.viralScore is int && data.viralScore >= 0 && data.viralScore <= 100 &&
+             data.diagnosisCritique is string && data.diagnosisCritique.size() >= 1 && data.diagnosisCritique.size() <= 2000 &&
+             data.first30sStrategy is string && data.first30sStrategy.size() >= 1 && data.first30sStrategy.size() <= 2000 &&
+             data.curiosityHook is string && data.curiosityHook.size() >= 1 && data.curiosityHook.size() <= 600 &&
+             data.contrarianHook is string && data.contrarianHook.size() >= 1 && data.contrarianHook.size() <= 600 &&
+             data.directValueHook is string && data.directValueHook.size() >= 1 && data.directValueHook.size() <= 600 &&
+             data.pacingSegments is list && data.pacingSegments.size() <= 25 &&
+             (data.pacingSegments.size() == 0 || data.pacingSegments[0] is map) &&
+             data.instagramCaption is string && data.instagramCaption.size() >= 1 && data.instagramCaption.size() <= 3000 &&
+             data.hashtags is list && data.hashtags.size() <= 15 &&
+             (data.hashtags.size() == 0 || data.hashtags[0] is string) &&
+             data.youtubeTitle is string && data.youtubeTitle.size() >= 1 && data.youtubeTitle.size() <= 120 &&
+             data.youtubeDescription is string && data.youtubeDescription.size() >= 1 && data.youtubeDescription.size() <= 4000 &&
+             data.thumbnailIdeas is list && data.thumbnailIdeas.size() <= 5 &&
+             (data.thumbnailIdeas.size() == 0 || data.thumbnailIdeas[0] is string) &&
+              data.rawJson is string && data.rawJson.size() >= 2 && data.rawJson.size() <= 25000 &&
+              (!('trendingTopics' in data) || (data.trendingTopics is list && data.trendingTopics.size() <= 12 && (data.trendingTopics.size() == 0 || data.trendingTopics[0] is string))) &&
+              (!('trendingTagSources' in data) || (data.trendingTagSources is list && data.trendingTagSources.size() <= 8 && (data.trendingTagSources.size() == 0 || data.trendingTagSources[0] is map))) &&
+              data.createdAt is timestamp && data.createdAt <= request.time &&
+              data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTaggedContentIdea(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.ideaText is string && data.ideaText.size() >= 1 && data.ideaText.size() <= 4000 &&
+             data.sourceType in ['voice', 'note'] &&
+             data.industryNiche is string && data.industryNiche.size() >= 1 && data.industryNiche.size() <= 120 &&
+             data.language is string && isValidLanguage(data.language) &&
+             data.platform is string && isValidPlatform(data.platform) &&
+             data.extractedKeywords is list && data.extractedKeywords.size() <= 10 &&
+             (data.extractedKeywords.size() == 0 || data.extractedKeywords[0] is string) &&
+             data.trendingTopics is list && data.trendingTopics.size() <= 12 &&
+             (data.trendingTopics.size() == 0 || data.trendingTopics[0] is string) &&
+             data.groundingRationale is string && data.groundingRationale.size() <= 1000 &&
+             (!('groundingSources' in data) || (data.groundingSources is list && data.groundingSources.size() <= 8 && (data.groundingSources.size() == 0 || data.groundingSources[0] is map))) &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidChatMessage(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.role in ['user', 'model'] &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 20000 &&
+             data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 64 &&
+             (!('thinkingSummary' in data) || (data.thinkingSummary is string && data.thinkingSummary.size() <= 10000)) &&
+             (!('groundingSources' in data) || (data.groundingSources is list && data.groundingSources.size() <= 10 && (data.groundingSources.size() == 0 || data.groundingSources[0] is map))) &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'preferredLanguage', 'preferredPlatform', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'preferredLanguage', 'preferredPlatform', 'fcmToken', 'fcmNicheTopic', 'createdAt', 'updatedAt']) &&
+                       isValidCreatorProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidCreatorProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'preferredLanguage', 'preferredPlatform', 'fcmToken', 'fcmNicheTopic', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /kits/{kitId} {
+        allow get: if isOwner(userId) && isValidId(kitId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(kitId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'mediaLabel', 'mediaKind', 'language', 'platform',
+                           'modelUsed', 'viralScore', 'diagnosisCritique', 'first30sStrategy',
+                           'curiosityHook', 'contrarianHook', 'directValueHook', 'pacingSegments',
+                           'instagramCaption', 'hashtags', 'youtubeTitle', 'youtubeDescription',
+                           'thumbnailIdeas', 'rawJson', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'mediaLabel', 'mediaKind', 'language', 'platform',
+                           'modelUsed', 'viralScore', 'diagnosisCritique', 'first30sStrategy',
+                           'curiosityHook', 'contrarianHook', 'directValueHook', 'pacingSegments',
+                           'instagramCaption', 'hashtags', 'youtubeTitle', 'youtubeDescription',
+                           'thumbnailIdeas', 'rawJson', 'trendingTopics', 'trendingTagSources',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidViralGrowthKit(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(kitId) &&
+                         isValidViralGrowthKit(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'language', 'platform', 'viralScore', 'diagnosisCritique',
+                           'first30sStrategy', 'curiosityHook', 'contrarianHook', 'directValueHook',
+                           'instagramCaption', 'hashtags', 'youtubeTitle', 'youtubeDescription',
+                           'thumbnailIdeas', 'rawJson', 'trendingTopics', 'trendingTagSources',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(kitId);
+      }
+
+      match /taggedIdeas/{ideaId} {
+        allow get: if isOwner(userId) && isValidId(ideaId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(ideaId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'ideaText', 'sourceType', 'industryNiche', 'language',
+                           'platform', 'extractedKeywords', 'trendingTopics', 'groundingRationale',
+                           'createdAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'ideaText', 'sourceType', 'industryNiche', 'language',
+                           'platform', 'extractedKeywords', 'trendingTopics', 'groundingRationale',
+                           'groundingSources', 'createdAt'
+                         ]) &&
+                         isValidTaggedContentIdea(incoming(), userId);
+
+        allow update: if false;
+
+        allow delete: if isOwner(userId) && isValidId(ideaId);
+      }
+
+      match /chatMessages/{messageId} {
+        allow get: if isOwner(userId) && isValidId(messageId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(messageId) &&
+                         incoming().keys().hasAll(['userId', 'role', 'text', 'modelId', 'createdAt']) &&
+                         incoming().keys().hasOnly(['userId', 'role', 'text', 'modelId', 'thinkingSummary', 'groundingSources', 'createdAt']) &&
+                         isValidChatMessage(incoming(), userId);
+
+        allow update: if false;
+
+        allow delete: if isOwner(userId) && isValidId(messageId);
+      }
+    }
+  }
+}

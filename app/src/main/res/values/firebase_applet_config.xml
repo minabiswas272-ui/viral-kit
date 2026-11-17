@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-viralkit-ff05aba0-6065-4009-a6f2-ed312cb94740</string>
+    <string name="recaptcha_site_key" translatable="false">6LfKnCQuAAAAAN-NSBsX3OOUwbBAl-dctBnhtZGf</string>
+</resources>

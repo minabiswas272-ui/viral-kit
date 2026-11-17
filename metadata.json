@@ -1,0 +1,6 @@
+{
+  "name": "ViralKit",
+  "description": "AI-powered Viral Content Strategist and Retention Studio for Reels and Shorts creators with multimodal video and audio analysis, Google Search grounding, multi-turn strategy chat, and cloud growth kit history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
