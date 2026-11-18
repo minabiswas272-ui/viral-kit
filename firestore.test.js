@@ -301,3 +301,133 @@ test("TaggedContentIdea create, list, immutability, and ViralGrowthKit trendingT
   );
 });
 
+test("StrategySession and nested messages enforce parent gate, immutability, and owner isolation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const now = new Date(Date.now() - 2000);
+
+  // Unauthenticated access denied
+  await assertFails(unauthDb.collection("users").doc(ALICE_UID).collection("strategySessions").get());
+
+  // Orphaned message without parent StrategySession must fail
+  await assertFails(
+    aliceDb
+      .collection("users")
+      .doc(ALICE_UID)
+      .collection("strategySessions")
+      .doc("missing_sess")
+      .collection("messages")
+      .doc("msg_orphan")
+      .set({
+        userId: ALICE_UID,
+        role: "user",
+        text: "Orphaned turn",
+        modelId: "gemini-4-hydrogen",
+        createdAt: now,
+      })
+  );
+
+  // Create StrategySession succeeds for owner
+  const sessionRef = aliceDb
+    .collection("users")
+    .doc(ALICE_UID)
+    .collection("strategySessions")
+    .doc("sess_1");
+
+  await assertSucceeds(
+    sessionRef.set({
+      userId: ALICE_UID,
+      title: "Hinglish Reels Hook Sprint",
+      lastMessagePreview: "Audit my 0:00-0:03 hook",
+      modelId: "gemini-4-hydrogen",
+      language: "Hinglish",
+      platform: "Instagram Reels",
+      messageCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Atomic batch write: create session + first message together succeeds via existsAfter()
+  const batch = aliceDb.batch();
+  const batchSessionRef = aliceDb
+    .collection("users")
+    .doc(ALICE_UID)
+    .collection("strategySessions")
+    .doc("sess_batch");
+  const batchMsgRef = batchSessionRef.collection("messages").doc("msg_1");
+  batch.set(batchSessionRef, {
+    userId: ALICE_UID,
+    title: "Batch Session",
+    lastMessagePreview: "First prompt",
+    modelId: "gemini-4-carbon",
+    language: "English",
+    platform: "YouTube Shorts",
+    messageCount: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
+  batch.set(batchMsgRef, {
+    userId: ALICE_UID,
+    role: "user",
+    text: "First prompt",
+    modelId: "gemini-4-carbon",
+    createdAt: now,
+  });
+  await assertSucceeds(batch.commit());
+
+  // Append model message & partial update on existing session
+  await assertSucceeds(
+    sessionRef.collection("messages").doc("msg_2").set({
+      userId: ALICE_UID,
+      role: "model",
+      text: "Open with a visual pattern interrupt at 0:01.",
+      modelId: "gemini-4-hydrogen",
+      thinkingSummary: "Evaluated hook drop-off.",
+      groundingSources: [{ title: "Creator Trends", uri: "https://trends.google.com" }],
+      createdAt: new Date(Date.now() - 500),
+    })
+  );
+  await assertSucceeds(
+    sessionRef.update({
+      title: "Renamed Reels Strategy",
+      lastMessagePreview: "Open with a visual pattern interrupt at 0:01.",
+      messageCount: 1,
+      updatedAt: new Date(Date.now() - 300),
+    })
+  );
+
+  // Immutable createdAt on session cannot be tampered
+  await assertFails(
+    sessionRef.update({
+      createdAt: new Date(Date.now() - 100),
+      updatedAt: new Date(Date.now() - 100),
+    })
+  );
+
+  // Nested message update is forbidden (messages immutable)
+  await assertFails(
+    sessionRef.collection("messages").doc("msg_2").update({ text: "Tampered" })
+  );
+
+  // List sessions and nested messages succeeds for owner, fails for other users
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("strategySessions").orderBy("updatedAt", "desc").get()
+  );
+  await assertSucceeds(
+    sessionRef.collection("messages").orderBy("createdAt", "asc").get()
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("strategySessions").get()
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("strategySessions").doc("sess_1").collection("messages").get()
+  );
+
+  // Owner can delete nested messages and session
+  await assertSucceeds(sessionRef.collection("messages").doc("msg_2").delete());
+  await assertSucceeds(sessionRef.delete());
+});
+
+

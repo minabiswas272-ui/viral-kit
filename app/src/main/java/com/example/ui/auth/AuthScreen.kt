@@ -54,7 +54,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import androidx.credentials.CredentialManager
+import com.example.CreateApkBottomCard
 import com.example.R
 
 @Composable
@@ -287,6 +289,12 @@ fun AuthScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            CreateApkBottomCard(
+                onShowToast = { msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            )
         }
     }
 }

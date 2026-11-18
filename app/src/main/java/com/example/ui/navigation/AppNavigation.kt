@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmarks
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Lock
@@ -71,6 +72,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.data.ai.ViralAiService
 import com.example.data.repository.ViralKitRepository
+import com.example.export.ApkExporter
 import com.example.notifications.TrendAlertPrefsStore
 import com.example.ui.auth.AuthScreen
 import com.example.ui.auth.authStateFlow
@@ -264,6 +266,25 @@ private fun StudioMainShell(
                         }
                     },
                     actions = {
+                        IconButton(
+                            onClick = {
+                                scope.launch {
+                                    val res = ApkExporter.downloadApkToDownloadsFolder(context)
+                                    val msg = res.getOrElse { it.localizedMessage ?: "Failed to download APK" }
+                                    snackbarHostState.showSnackbar(msg)
+                                }
+                            },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("top_download_apk_button")
+                        ) {
+                            Icon(
+                                Icons.Rounded.Download,
+                                contentDescription = "Download ViralKit APK",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                         IconButton(
                             onClick = { navController.navigate(ROUTE_HISTORY) { launchSingleTop = true } },
                             modifier = Modifier

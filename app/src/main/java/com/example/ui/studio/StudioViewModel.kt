@@ -15,6 +15,7 @@ import com.example.data.model.GroundingSource
 import com.example.data.model.LatestTrendAlert
 import com.example.data.model.MediaAttachment
 import com.example.data.model.StrategistModel
+import com.example.data.model.StrategySession
 import com.example.data.model.TaggedContentIdea
 import com.example.data.model.TargetLanguage
 import com.example.data.model.TargetPlatform
@@ -32,6 +33,7 @@ import com.example.notifications.TrendNotificationHelper
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +41,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -146,16 +152,66 @@ class StudioViewModel(
             initialValue = StreamUiState.Loading
         )
 
-    val chatHistoryState: StateFlow<StreamUiState<List<ChatMessageRecord>>> = repository.observeChatMessages(currentUserId)
-        .map<List<ChatMessageRecord>, StreamUiState<List<ChatMessageRecord>>> { StreamUiState.Success(it) }
-        .catch { error ->
-            val firestoreError = generateSequence(error) { it.cause }
-                .filterIsInstance<FirebaseFirestoreException>()
-                .firstOrNull()
-            if (firestoreError == null && error is CancellationException) throw error
-            val rootError = firestoreError ?: error
-            Log.w(TAG, "Error observing chat history", rootError)
-            emit(StreamUiState.Error(rootError.message ?: "Failed to load chat history"))
+    private val _activeSessionId = MutableStateFlow<String?>(null)
+    val activeSessionId: StateFlow<String?> = _activeSessionId.asStateFlow()
+
+    private var userRequestedFreshSession = false
+
+    val strategySessionsState: StateFlow<StreamUiState<List<StrategySession>>> =
+        repository.observeStrategySessions(currentUserId)
+            .onEach { sessions ->
+                if (_activeSessionId.value == null && !userRequestedFreshSession && sessions.isNotEmpty()) {
+                    _activeSessionId.value = sessions.first().id
+                }
+            }
+            .map<List<StrategySession>, StreamUiState<List<StrategySession>>> { StreamUiState.Success(it) }
+            .catch { error ->
+                val firestoreError = generateSequence(error) { it.cause }
+                    .filterIsInstance<FirebaseFirestoreException>()
+                    .firstOrNull()
+                if (firestoreError == null && error is CancellationException) throw error
+                val rootError = firestoreError ?: error
+                Log.w(TAG, "Error observing strategy sessions", rootError)
+                emit(StreamUiState.Error(rootError.message ?: "Failed to load strategy sessions"))
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = StreamUiState.Loading
+            )
+
+    val activeSession: StateFlow<StrategySession?> = combine(
+        strategySessionsState,
+        _activeSessionId
+    ) { sessionsUi, activeId ->
+        val sessions = (sessionsUi as? StreamUiState.Success)?.data.orEmpty()
+        sessions.firstOrNull { it.id == activeId }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+        initialValue = null
+    )
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val chatHistoryState: StateFlow<StreamUiState<List<ChatMessageRecord>>> = _activeSessionId
+        .flatMapLatest { sessionId ->
+            if (sessionId.isNullOrBlank()) {
+                flowOf(StreamUiState.Success(emptyList()))
+            } else {
+                repository.observeSessionMessages(currentUserId, sessionId)
+                    .map<List<ChatMessageRecord>, StreamUiState<List<ChatMessageRecord>>> {
+                        StreamUiState.Success(it)
+                    }
+                    .catch { error ->
+                        val firestoreError = generateSequence(error) { it.cause }
+                            .filterIsInstance<FirebaseFirestoreException>()
+                            .firstOrNull()
+                        if (firestoreError == null && error is CancellationException) throw error
+                        val rootError = firestoreError ?: error
+                        Log.w(TAG, "Error observing chat history", rootError)
+                        emit(StreamUiState.Error(rootError.message ?: "Failed to load chat history"))
+                    }
+            }
         }
         .stateIn(
             scope = viewModelScope,
@@ -298,6 +354,17 @@ class StudioViewModel(
         TrendNotificationHelper.ensureChannel(appContext)
         syncFcmRegistration(silent = true)
         observeConnectivityAndSync()
+        migrateLegacyChatHistoryIfNeeded()
+    }
+
+    private fun migrateLegacyChatHistoryIfNeeded() {
+        viewModelScope.launch {
+            val res = repository.migrateLegacyChatIfNeeded(currentUserId)
+            val migratedSessionId = res.getOrNull()
+            if (!migratedSessionId.isNullOrBlank() && _activeSessionId.value == null && !userRequestedFreshSession) {
+                _activeSessionId.value = migratedSessionId
+            }
+        }
     }
 
     private fun observeConnectivityAndSync() {
@@ -1014,13 +1081,74 @@ class StudioViewModel(
         _chatSearchGrounding.value = enabled
     }
 
-    fun sendChatPrompt(rawPrompt: String) {
+    fun startNewStrategySession() {
+        if (_chatStreamDraft.value.isStreaming) return
+        userRequestedFreshSession = true
+        _activeSessionId.value = null
+        _lastSearchWidgetHtml.value = null
+        _chatStreamDraft.value = StreamingChatDraft(model = _chatModel.value)
+    }
+
+    fun selectStrategySession(sessionId: String) {
+        if (sessionId.isBlank() || _chatStreamDraft.value.isStreaming) return
+        userRequestedFreshSession = false
+        _activeSessionId.value = sessionId
+        _lastSearchWidgetHtml.value = null
+        _chatStreamDraft.value = StreamingChatDraft(model = _chatModel.value)
+        val sessions = (strategySessionsState.value as? StreamUiState.Success)?.data.orEmpty()
+        sessions.firstOrNull { it.id == sessionId }?.let { session ->
+            _chatModel.value = StrategistModel.fromModelId(session.modelId)
+        }
+    }
+
+    fun renameStrategySession(sessionId: String, newTitle: String) {
+        val trimmed = newTitle.trim().take(MAX_KIT_TITLE_CHARS)
+        if (sessionId.isBlank() || trimmed.isEmpty()) {
+            _statusBanner.value = "Session title cannot be empty."
+            return
+        }
+        viewModelScope.launch {
+            val res = repository.renameStrategySession(sessionId, trimmed)
+            if (res.isSuccess) {
+                _statusBanner.value = "Renamed strategy session to \"$trimmed\"."
+            } else {
+                _statusBanner.value = "Rename failed: ${res.exceptionOrNull()?.localizedMessage}"
+            }
+        }
+    }
+
+    fun deleteStrategySession(sessionId: String) {
+        if (sessionId.isBlank()) return
+        viewModelScope.launch {
+            val res = repository.deleteStrategySession(sessionId)
+            if (res.isSuccess) {
+                if (_activeSessionId.value == sessionId) {
+                    userRequestedFreshSession = false
+                    _activeSessionId.value = null
+                    _lastSearchWidgetHtml.value = null
+                }
+                _statusBanner.value = "Deleted strategy session."
+            } else {
+                _statusBanner.value = "Delete failed: ${res.exceptionOrNull()?.localizedMessage}"
+            }
+        }
+    }
+
+    fun sendChatPrompt(rawPrompt: String, customSessionTitle: String? = null) {
         val prompt = rawPrompt.trim().take(MAX_CHAT_PROMPT_CHARS)
         if (prompt.isEmpty() || _chatStreamDraft.value.isStreaming) return
 
-        val currentHistory = (chatHistoryState.value as? StreamUiState.Success)?.data.orEmpty()
+        val targetSessionId = _activeSessionId.value
+        val currentHistory = if (targetSessionId.isNullOrBlank()) {
+            emptyList()
+        } else {
+            (chatHistoryState.value as? StreamUiState.Success)?.data.orEmpty()
+        }
         val chosenModel = _chatModel.value
         val useGrounding = _chatSearchGrounding.value && chosenModel == StrategistModel.HYDROGEN
+        val currentLanguage = _selectedLanguage.value
+        val currentPlatform = _selectedPlatform.value
+        userRequestedFreshSession = false
 
         viewModelScope.launch {
             _chatStreamDraft.value = StreamingChatDraft(
@@ -1038,7 +1166,17 @@ class StudioViewModel(
                 text = prompt,
                 modelId = chosenModel.modelId
             )
-            val userSaveResult = repository.saveChatMessage(userMsg)
+            val userSaveResult = repository.appendMessageToSession(
+                sessionId = targetSessionId,
+                message = userMsg,
+                language = currentLanguage,
+                platform = currentPlatform,
+                sessionTitleIfNew = customSessionTitle
+            )
+            val resolvedSessionId = userSaveResult.getOrNull() ?: targetSessionId
+            if (resolvedSessionId != null && _activeSessionId.value != resolvedSessionId) {
+                _activeSessionId.value = resolvedSessionId
+            }
             if (userSaveResult.isFailure) {
                 _statusBanner.value = "Could not persist message: ${userSaveResult.exceptionOrNull()?.localizedMessage}"
             }
@@ -1082,7 +1220,13 @@ class StudioViewModel(
                     thinkingSummary = finalThoughts,
                     groundingSources = finalSources
                 )
-                repository.saveChatMessage(modelMsg)
+                repository.appendMessageToSession(
+                    sessionId = resolvedSessionId,
+                    message = modelMsg,
+                    language = currentLanguage,
+                    platform = currentPlatform,
+                    sessionTitleIfNew = customSessionTitle
+                )
                 _chatStreamDraft.value = StreamingChatDraft(model = chosenModel)
             } catch (e: TimeoutCancellationException) {
                 Log.e(TAG, "Chat stream timed out", e)
@@ -1105,6 +1249,11 @@ class StudioViewModel(
     }
 
     fun clearChatHistory() {
+        val currentSessionId = _activeSessionId.value
+        if (!currentSessionId.isNullOrBlank()) {
+            deleteStrategySession(currentSessionId)
+            return
+        }
         viewModelScope.launch {
             val res = repository.clearChatHistory()
             _lastSearchWidgetHtml.value = null
@@ -1188,12 +1337,17 @@ class StudioViewModel(
     }
 
     fun discussKitInChat(kit: ViralGrowthKit) {
+        startNewStrategySession()
+        userRequestedFreshSession = false
         val prompt = """
             Let's optimize my "${kit.title}" kit (${kit.platform}, ${kit.language}, Viral Score ${kit.viralScore}/100).
             Critique received: ${kit.diagnosisCritique}
             Give me 2 alternative retention twists for the 0:05-0:15 mid-roll dip and a tighter CTA!
         """.trimIndent()
-        sendChatPrompt(prompt)
+        sendChatPrompt(
+            rawPrompt = prompt,
+            customSessionTitle = "Kit: ${kit.title.take(45)}"
+        )
     }
 
     fun consumeStatusBanner() {

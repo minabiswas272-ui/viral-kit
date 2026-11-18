@@ -179,6 +179,21 @@ data class ChatMessageRecord(
     @ServerTimestamp val createdAt: Timestamp? = null
 )
 
+@Keep
+@IgnoreExtraProperties
+data class StrategySession(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val title: String = "New Strategy Session",
+    val lastMessagePreview: String = "",
+    val modelId: String = StrategistModel.HYDROGEN.modelId,
+    val language: String = TargetLanguage.ENGLISH.label,
+    val platform: String = TargetPlatform.INSTAGRAM_REELS.label,
+    val messageCount: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
 data class MediaAttachment(
     val uriString: String,
     val displayName: String,

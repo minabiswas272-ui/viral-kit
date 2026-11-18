@@ -25,20 +25,28 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddComment
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.TravelExplore
 import androidx.compose.material3.AlertDialog
@@ -46,6 +54,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -53,12 +62,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -78,16 +89,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.ChatMessageRecord
 import com.example.data.model.StrategistModel
+import com.example.data.model.StrategySession
 import com.example.data.model.TargetLanguage
 import com.example.data.model.TargetPlatform
 import com.example.ui.components.openSafeExternalUri
 import com.example.ui.studio.StreamUiState
 import com.example.ui.studio.StreamingChatDraft
 import com.example.ui.studio.StudioViewModel
+import java.text.SimpleDateFormat
+import java.util.Locale
 import kotlinx.coroutines.launch
 
 private const val MAX_STRATEGY_INPUT_CHARS = 4000
@@ -99,6 +114,8 @@ fun StrategyChatScreen(
     modifier: Modifier = Modifier
 ) {
     val chatState by viewModel.chatHistoryState.collectAsStateWithLifecycle()
+    val sessionsState by viewModel.strategySessionsState.collectAsStateWithLifecycle()
+    val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
     val selectedModel by viewModel.chatModel.collectAsStateWithLifecycle()
     val searchGrounding by viewModel.chatSearchGrounding.collectAsStateWithLifecycle()
     val streamDraft by viewModel.chatStreamDraft.collectAsStateWithLifecycle()
@@ -109,6 +126,8 @@ fun StrategyChatScreen(
 
     StrategyChatContent(
         chatState = chatState,
+        sessionsState = sessionsState,
+        activeSession = activeSession,
         selectedModel = selectedModel,
         searchGrounding = searchGrounding,
         streamDraft = streamDraft,
@@ -118,14 +137,18 @@ fun StrategyChatScreen(
         isOnline = isOnline,
         onSelectModel = viewModel::selectChatModel,
         onToggleSearchGrounding = { viewModel.toggleChatSearchGrounding(!searchGrounding) },
-        onSendPrompt = viewModel::sendChatPrompt,
+        onSendPrompt = { prompt -> viewModel.sendChatPrompt(prompt) },
         onClearHistory = viewModel::clearChatHistory,
+        onSelectSession = viewModel::selectStrategySession,
+        onNewSession = viewModel::startNewStrategySession,
+        onRenameSession = viewModel::renameStrategySession,
+        onDeleteSession = viewModel::deleteStrategySession,
         onShowToast = onShowToast,
         modifier = modifier
     )
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun StrategyChatContent(
     chatState: StreamUiState<List<ChatMessageRecord>>,
@@ -140,11 +163,21 @@ fun StrategyChatContent(
     onToggleSearchGrounding: () -> Unit,
     onSendPrompt: (String) -> Unit,
     onClearHistory: () -> Unit,
+    sessionsState: StreamUiState<List<StrategySession>> = StreamUiState.Success(emptyList()),
+    activeSession: StrategySession? = null,
+    onSelectSession: (String) -> Unit = {},
+    onNewSession: () -> Unit = {},
+    onRenameSession: (String, String) -> Unit = { _, _ -> },
+    onDeleteSession: (String) -> Unit = {},
     onShowToast: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var inputText by remember { mutableStateOf("") }
     var showClearDialog by remember { mutableStateOf(false) }
+    var showSessionsSheet by remember { mutableStateOf(false) }
+    var renameTargetSession by remember { mutableStateOf<StrategySession?>(null) }
+    var renameDraft by remember { mutableStateOf("") }
+    var deleteTargetSession by remember { mutableStateOf<StrategySession?>(null) }
 
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -152,6 +185,7 @@ fun StrategyChatContent(
     val clipboardManager = LocalClipboardManager.current
 
     val messages = (chatState as? StreamUiState.Success)?.data.orEmpty()
+    val savedSessions = (sessionsState as? StreamUiState.Success)?.data.orEmpty()
     val canJumpToBottom by remember(messages.size, streamDraft.isStreaming) {
         derivedStateOf { listState.canScrollForward }
     }
@@ -201,9 +235,12 @@ fun StrategyChatContent(
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Strategy Conversation",
+                            text = activeSession?.title?.takeIf { it.isNotBlank() } ?: "New Strategy Session",
                             style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("strategy_active_session_title")
                         )
                         Text(
                             text = "${messages.size} ${if (messages.size == 1) "turn" else "turns"} · ${platform.label}",
@@ -238,19 +275,39 @@ fun StrategyChatContent(
                         }
                     }
 
-                    if (selectedModel == StrategistModel.HYDROGEN) {
-                        FilterChip(
-                            selected = searchGrounding,
-                            onClick = onToggleSearchGrounding,
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Rounded.TravelExplore,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = { Text("Search") },
-                            modifier = Modifier.testTag("strategy_chat_search_chip")
+                    FilterChip(
+                        selected = showSessionsSheet,
+                        onClick = { showSessionsSheet = true },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.History,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = if (savedSessions.isNotEmpty()) {
+                                    "Sessions (${savedSessions.size})"
+                                } else {
+                                    "Sessions"
+                                }
+                            )
+                        },
+                        modifier = Modifier.testTag("strategy_sessions_button")
+                    )
+
+                    IconButton(
+                        onClick = onNewSession,
+                        enabled = !streamDraft.isStreaming,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("strategy_new_session_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AddComment,
+                            contentDescription = "Start new strategy session",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
 
@@ -263,14 +320,34 @@ fun StrategyChatContent(
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.DeleteSweep,
-                                contentDescription = "Clear strategy conversation",
+                                contentDescription = "Delete strategy session",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
                 }
 
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (selectedModel == StrategistModel.HYDROGEN) {
+                        item(key = "strategy_search_toggle") {
+                            FilterChip(
+                                selected = searchGrounding,
+                                onClick = onToggleSearchGrounding,
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.TravelExplore,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                label = { Text("Search") },
+                                modifier = Modifier.testTag("strategy_chat_search_chip")
+                            )
+                        }
+                    }
                     items(StrategistModel.entries, key = { it.name }) { model ->
                         FilterChip(
                             selected = selectedModel == model,
@@ -329,7 +406,9 @@ fun StrategyChatContent(
                             language = language,
                             platform = platform,
                             enabled = isOnline,
-                            onSelectStarter = onSendPrompt
+                            recentSessions = savedSessions.take(3),
+                            onSelectStarter = onSendPrompt,
+                            onResumeSession = onSelectSession
                         )
                     } else {
                         LazyColumn(
@@ -511,10 +590,10 @@ fun StrategyChatContent(
     if (showClearDialog) {
         AlertDialog(
             onDismissRequest = { showClearDialog = false },
-            title = { Text("Clear Strategy Thread?") },
+            title = { Text("Delete Strategy Thread?") },
             text = {
                 Text(
-                    text = "Remove all ${messages.size} messages in this multi-turn strategist conversation?",
+                    text = "Remove this session and all ${messages.size} saved messages from Firestore?",
                     style = MaterialTheme.typography.bodyMedium
                 )
             },
@@ -530,7 +609,7 @@ fun StrategyChatContent(
                     ),
                     modifier = Modifier.testTag("strategy_chat_clear_confirm")
                 ) {
-                    Text("Clear")
+                    Text("Delete")
                 }
             },
             dismissButton = {
@@ -543,6 +622,343 @@ fun StrategyChatContent(
             }
         )
     }
+
+    if (showSessionsSheet) {
+        StrategySessionsSheet(
+            sessionsState = sessionsState,
+            activeSessionId = activeSession?.id,
+            isStreaming = streamDraft.isStreaming,
+            onDismiss = { showSessionsSheet = false },
+            onSelectSession = { sessionId ->
+                showSessionsSheet = false
+                onSelectSession(sessionId)
+            },
+            onNewSession = {
+                showSessionsSheet = false
+                onNewSession()
+            },
+            onRequestRename = { session ->
+                renameDraft = session.title
+                renameTargetSession = session
+            },
+            onRequestDelete = { session ->
+                deleteTargetSession = session
+            }
+        )
+    }
+
+    renameTargetSession?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renameTargetSession = null },
+            title = { Text("Rename Strategy Session") },
+            text = {
+                OutlinedTextField(
+                    value = renameDraft,
+                    onValueChange = { renameDraft = it.take(120) },
+                    label = { Text("Session title") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("strategy_rename_session_input")
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = renameDraft.trim()
+                        if (trimmed.isNotEmpty()) {
+                            onRenameSession(target.id, trimmed)
+                            renameTargetSession = null
+                        }
+                    },
+                    enabled = renameDraft.isNotBlank(),
+                    modifier = Modifier.testTag("strategy_rename_session_confirm")
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTargetSession = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    deleteTargetSession?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTargetSession = null },
+            title = { Text("Delete Session?") },
+            text = {
+                Text(
+                    text = "Permanently remove \"${target.title}\" and its saved Firestore messages?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteSession(target.id)
+                        deleteTargetSession = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.testTag("strategy_delete_session_confirm")
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTargetSession = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StrategySessionsSheet(
+    sessionsState: StreamUiState<List<StrategySession>>,
+    activeSessionId: String?,
+    isStreaming: Boolean,
+    onDismiss: () -> Unit,
+    onSelectSession: (String) -> Unit,
+    onNewSession: () -> Unit,
+    onRequestRename: (StrategySession) -> Unit,
+    onRequestDelete: (StrategySession) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val dateFormatter = remember { SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.testTag("strategy_sessions_sheet")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "AI Strategy Sessions",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Synced with Cloud Firestore — tap any session to resume",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Button(
+                    onClick = onNewSession,
+                    enabled = !isStreaming,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("strategy_sheet_new_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("New")
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+
+            when (sessionsState) {
+                is StreamUiState.Loading -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+
+                is StreamUiState.Error -> {
+                    Text(
+                        text = sessionsState.message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+
+                is StreamUiState.Success -> {
+                    val sessions = sessionsState.data
+                    if (sessions.isEmpty()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainer,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.History,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "No saved strategy sessions yet",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Send your first prompt to automatically create and persist a multi-turn session.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(360.dp)
+                        ) {
+                            items(sessions, key = { it.id }) { session ->
+                                val isActive = session.id == activeSessionId
+                                val model = StrategistModel.fromModelId(session.modelId)
+                                val timestampLabel = session.updatedAt?.toDate()?.let { dateFormatter.format(it) }
+                                    ?: "Just now"
+                                Surface(
+                                    onClick = { if (!isStreaming) onSelectSession(session.id) },
+                                    color = if (isActive) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainer
+                                    },
+                                    shape = RoundedCornerShape(16.dp),
+                                    border = BorderStroke(
+                                        width = if (isActive) 1.5.dp else 1.dp,
+                                        color = if (isActive) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                        }
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("strategy_session_item_${session.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = session.title.ifBlank { "Strategy Session" },
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (isActive) {
+                                                    Surface(
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        shape = RoundedCornerShape(50)
+                                                    ) {
+                                                        Text(
+                                                            text = "Active",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onPrimary,
+                                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            if (session.lastMessagePreview.isNotBlank()) {
+                                                Text(
+                                                    text = session.lastMessagePreview,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            Text(
+                                                text = "${model.displayName} · ${session.messageCount} ${if (session.messageCount == 1L) "msg" else "msgs"} · ${session.platform} · $timestampLabel",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.secondary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = { onRequestRename(session) },
+                                            modifier = Modifier
+                                                .minimumInteractiveComponentSize()
+                                                .testTag("strategy_session_rename_${session.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Edit,
+                                                contentDescription = "Rename ${session.title}",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = { onRequestDelete(session) },
+                                            modifier = Modifier
+                                                .minimumInteractiveComponentSize()
+                                                .testTag("strategy_session_delete_${session.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.DeleteOutline,
+                                                contentDescription = "Delete ${session.title}",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -551,7 +967,9 @@ private fun StrategyChatEmptyState(
     language: TargetLanguage,
     platform: TargetPlatform,
     enabled: Boolean,
-    onSelectStarter: (String) -> Unit
+    recentSessions: List<StrategySession>,
+    onSelectStarter: (String) -> Unit,
+    onResumeSession: (String) -> Unit
 ) {
     val starters = listOf(
         "Audit my 0:00-0:03 hook in ${language.label} for ${platform.label}",
@@ -562,6 +980,7 @@ private fun StrategyChatEmptyState(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp)
             .testTag("strategy_chat_empty_state"),
         verticalArrangement = Arrangement.Center,
@@ -614,6 +1033,64 @@ private fun StrategyChatEmptyState(
                     label = { Text(starter) },
                     modifier = Modifier.testTag("strategy_starter_chip_$index")
                 )
+            }
+        }
+
+        if (recentSessions.isNotEmpty()) {
+            Spacer(Modifier.height(22.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 520.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Resume Previous Session",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+                recentSessions.forEach { session ->
+                    Surface(
+                        onClick = { onResumeSession(session.id) },
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("strategy_resume_recent_${session.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = "Resume ${session.title}",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = session.title.ifBlank { "Strategy Session" },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${session.messageCount} ${if (session.messageCount == 1L) "msg" else "msgs"} · ${session.lastMessagePreview.ifBlank { session.platform }}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -12,6 +12,7 @@ import com.example.data.local.ViralKitEntity
 import com.example.data.model.ChatMessageRecord
 import com.example.data.model.CreatorProfile
 import com.example.data.model.GroundingSource
+import com.example.data.model.StrategySession
 import com.example.data.model.TaggedContentIdea
 import com.example.data.model.TargetLanguage
 import com.example.data.model.TargetPlatform
@@ -1081,6 +1082,303 @@ class ViralKitRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, colPath)
+            Result.failure(e)
+        }
+    }
+
+    fun observeStrategySessions(userId: String): Flow<List<StrategySession>> = flow {
+        val uid = requireUserId()
+        check(uid == userId) { "Signed-in user mismatch for strategy sessions stream." }
+        val colRef = db.collection("users").document(uid).collection("strategySessions")
+        emitAll(
+            colRef
+                .orderBy("updatedAt", Query.Direction.DESCENDING)
+                .limit(40)
+                .snapshots()
+                .map { snapshot ->
+                    snapshot.toObjects(
+                        StrategySession::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    )
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(exceptionToLog, OperationType.LIST, colRef.path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    fun observeSessionMessages(userId: String, sessionId: String): Flow<List<ChatMessageRecord>> = flow {
+        val uid = requireUserId()
+        check(uid == userId) { "Signed-in user mismatch for session messages stream." }
+        if (sessionId.isBlank()) {
+            emit(emptyList())
+            return@flow
+        }
+        val colRef = db.collection("users")
+            .document(uid)
+            .collection("strategySessions")
+            .document(sessionId)
+            .collection("messages")
+        emitAll(
+            colRef
+                .orderBy("createdAt", Query.Direction.ASCENDING)
+                .snapshots()
+                .map { snapshot ->
+                    snapshot.toObjects(
+                        ChatMessageRecord::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    )
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(exceptionToLog, OperationType.LIST, colRef.path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    suspend fun createStrategySession(
+        title: String,
+        modelId: String,
+        language: TargetLanguage,
+        platform: TargetPlatform
+    ): Result<String> {
+        var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}/strategySessions"
+        return try {
+            val uid = requireUserId()
+            val docRef = db.collection("users").document(uid).collection("strategySessions").document()
+            docPath = docRef.path
+            val safeTitle = title.trim().ifBlank { "New Strategy Session" }.take(160)
+            val safeModel = modelId.trim().ifBlank { "gemini-4-hydrogen" }.take(64)
+            val payload = mapOf(
+                "userId" to uid,
+                "title" to safeTitle,
+                "lastMessagePreview" to "",
+                "modelId" to safeModel,
+                "language" to language.label,
+                "platform" to platform.label,
+                "messageCount" to 0L,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).await()
+            Result.success(docRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun appendMessageToSession(
+        sessionId: String?,
+        message: ChatMessageRecord,
+        language: TargetLanguage,
+        platform: TargetPlatform,
+        sessionTitleIfNew: String? = null
+    ): Result<String> {
+        var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}/strategySessions"
+        return try {
+            val uid = requireUserId()
+            val sessionsCol = db.collection("users").document(uid).collection("strategySessions")
+            val sessionRef = if (!sessionId.isNullOrBlank()) {
+                sessionsCol.document(sessionId)
+            } else {
+                sessionsCol.document()
+            }
+            docPath = sessionRef.path
+
+            val safeRole = if (message.role == "model") "model" else "user"
+            val safeText = message.text.trim().ifBlank { "..." }.take(20000)
+            val safeModel = message.modelId.trim().ifBlank { "gemini-4-hydrogen" }.take(64)
+            val preview = safeText.replace('\n', ' ').trim().take(280)
+
+            val messageRef = sessionRef.collection("messages").document()
+            val messagePayload = buildMap<String, Any> {
+                put("userId", uid)
+                put("role", safeRole)
+                put("text", safeText)
+                put("modelId", safeModel)
+                val summary = message.thinkingSummary?.trim()?.takeIf { it.isNotEmpty() }?.take(10000)
+                if (summary != null) put("thinkingSummary", summary)
+                val sources = message.groundingSources.take(10).map { it.toMap() }
+                if (sources.isNotEmpty()) put("groundingSources", sources)
+                put("createdAt", FieldValue.serverTimestamp())
+            }
+
+            val existingSnap = sessionRef.get().await()
+            val batch = db.batch()
+            if (!existingSnap.exists()) {
+                val safeTitle = sessionTitleIfNew?.trim()?.takeIf { it.isNotEmpty() }?.take(160)
+                    ?: safeText.replace('\n', ' ').trim().take(60).ifBlank { "New Strategy Session" }
+                val sessionPayload = mapOf(
+                    "userId" to uid,
+                    "title" to safeTitle,
+                    "lastMessagePreview" to preview,
+                    "modelId" to safeModel,
+                    "language" to language.label,
+                    "platform" to platform.label,
+                    "messageCount" to 1L,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                batch.set(sessionRef, sessionPayload)
+            } else {
+                val updates = buildMap<String, Any> {
+                    put("lastMessagePreview", preview)
+                    put("modelId", safeModel)
+                    put("language", language.label)
+                    put("platform", platform.label)
+                    put("messageCount", FieldValue.increment(1L))
+                    put("updatedAt", FieldValue.serverTimestamp())
+                    val currentTitle = existingSnap.getString("title").orEmpty()
+                    val candidateTitle = sessionTitleIfNew?.trim()?.takeIf { it.isNotEmpty() }?.take(160)
+                    if (candidateTitle != null && currentTitle == "New Strategy Session") {
+                        put("title", candidateTitle)
+                    }
+                }
+                batch.update(sessionRef, updates)
+            }
+            batch.set(messageRef, messagePayload)
+            batch.commit().await()
+            Result.success(sessionRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun renameStrategySession(sessionId: String, newTitle: String): Result<Unit> {
+        var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}/strategySessions/$sessionId"
+        return try {
+            val uid = requireUserId()
+            require(sessionId.isNotBlank()) { "Session ID cannot be blank" }
+            val safeTitle = newTitle.trim().take(160)
+            require(safeTitle.isNotEmpty()) { "Session title cannot be empty" }
+            val docRef = db.collection("users").document(uid)
+                .collection("strategySessions").document(sessionId)
+            docPath = docRef.path
+            docRef.update(
+                mapOf(
+                    "title" to safeTitle,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteStrategySession(sessionId: String): Result<Unit> {
+        var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}/strategySessions/$sessionId"
+        return try {
+            val uid = requireUserId()
+            require(sessionId.isNotBlank()) { "Session ID cannot be blank" }
+            val sessionRef = db.collection("users").document(uid)
+                .collection("strategySessions").document(sessionId)
+            docPath = sessionRef.path
+            val msgDocs = sessionRef.collection("messages").get().await().documents
+            for (chunk in msgDocs.chunked(400)) {
+                val batch = db.batch()
+                chunk.forEach { batch.delete(it.reference) }
+                batch.commit().await()
+            }
+            sessionRef.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun migrateLegacyChatIfNeeded(userId: String): Result<String?> {
+        var colPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}/strategySessions"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch for legacy chat migration." }
+            val userRef = db.collection("users").document(uid)
+            val sessionsCol = userRef.collection("strategySessions")
+            colPath = sessionsCol.path
+            val existingSessions = sessionsCol.limit(1).get().await()
+            if (!existingSessions.isEmpty) {
+                return Result.success(null)
+            }
+            val legacyDocs = userRef.collection("chatMessages")
+                .orderBy("createdAt", Query.Direction.ASCENDING)
+                .limit(100)
+                .get()
+                .await()
+            if (legacyDocs.isEmpty) {
+                return Result.success(null)
+            }
+
+            val legacyMessages = legacyDocs.toObjects(
+                ChatMessageRecord::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+            )
+            val firstUserText = legacyMessages.firstOrNull { it.role == "user" }?.text.orEmpty()
+            val lastMessage = legacyMessages.last()
+            val newSessionRef = sessionsCol.document()
+            val batch = db.batch()
+            batch.set(
+                newSessionRef,
+                mapOf(
+                    "userId" to uid,
+                    "title" to firstUserText.replace('\n', ' ').trim().take(60)
+                        .ifBlank { "Previous Strategy Session" },
+                    "lastMessagePreview" to lastMessage.text.replace('\n', ' ').trim().take(280),
+                    "modelId" to lastMessage.modelId.ifBlank { "gemini-4-hydrogen" }.take(64),
+                    "language" to TargetLanguage.ENGLISH.label,
+                    "platform" to TargetPlatform.INSTAGRAM_REELS.label,
+                    "messageCount" to legacyMessages.size.toLong(),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            legacyMessages.forEach { msg ->
+                val msgRef = newSessionRef.collection("messages").document()
+                val payload = buildMap<String, Any> {
+                    put("userId", uid)
+                    put("role", if (msg.role == "model") "model" else "user")
+                    put("text", msg.text.trim().ifBlank { "..." }.take(20000))
+                    put("modelId", msg.modelId.trim().ifBlank { "gemini-4-hydrogen" }.take(64))
+                    val summary = msg.thinkingSummary?.trim()?.takeIf { it.isNotEmpty() }?.take(10000)
+                    if (summary != null) put("thinkingSummary", summary)
+                    val sources = msg.groundingSources.take(10).map { it.toMap() }
+                    if (sources.isNotEmpty()) put("groundingSources", sources)
+                    put("createdAt", FieldValue.serverTimestamp())
+                }
+                batch.set(msgRef, payload)
+            }
+            batch.commit().await()
+            Result.success(newSessionRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, colPath)
             Result.failure(e)
         }
     }

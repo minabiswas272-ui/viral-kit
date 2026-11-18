@@ -98,9 +98,21 @@ service cloud.firestore {
              data.role in ['user', 'model'] &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 20000 &&
              data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 64 &&
-             (!('thinkingSummary' in data) || (data.thinkingSummary is string && data.thinkingSummary.size() <= 10000)) &&
+             (!('thinkingSummary' in data) || data.thinkingSummary == null || (data.thinkingSummary is string && data.thinkingSummary.size() <= 10000)) &&
              (!('groundingSources' in data) || (data.groundingSources is list && data.groundingSources.size() <= 10 && (data.groundingSources.size() == 0 || data.groundingSources[0] is map))) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidStrategySession(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+             data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300 &&
+             data.modelId is string && data.modelId.size() >= 1 && data.modelId.size() <= 64 &&
+             data.language is string && isValidLanguage(data.language) &&
+             data.platform is string && isValidPlatform(data.platform) &&
+             data.messageCount is int && data.messageCount >= 0 && data.messageCount <= 10000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
     match /users/{userId} {
@@ -197,6 +209,53 @@ service cloud.firestore {
         allow update: if false;
 
         allow delete: if isOwner(userId) && isValidId(messageId);
+      }
+
+      match /strategySessions/{sessionId} {
+        allow get: if isOwner(userId) && isValidId(sessionId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(sessionId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'lastMessagePreview', 'modelId', 'language',
+                           'platform', 'messageCount', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'lastMessagePreview', 'modelId', 'language',
+                           'platform', 'messageCount', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidStrategySession(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(sessionId) &&
+                         isValidStrategySession(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'lastMessagePreview', 'modelId', 'language',
+                           'platform', 'messageCount', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(sessionId);
+
+        match /messages/{messageId} {
+          allow get: if isOwner(userId) && isValidId(sessionId) && isValidId(messageId);
+          allow list: if isOwner(userId) && isValidId(sessionId);
+
+          allow create: if isOwner(userId) &&
+                           isValidId(sessionId) &&
+                           isValidId(messageId) &&
+                           incoming().keys().hasAll(['userId', 'role', 'text', 'modelId', 'createdAt']) &&
+                           incoming().keys().hasOnly(['userId', 'role', 'text', 'modelId', 'thinkingSummary', 'groundingSources', 'createdAt']) &&
+                           isValidChatMessage(incoming(), userId) &&
+                           (exists(/databases/$(database)/documents/users/$(userId)/strategySessions/$(sessionId)) ||
+                            existsAfter(/databases/$(database)/documents/users/$(userId)/strategySessions/$(sessionId)));
+
+          allow update: if false;
+
+          allow delete: if isOwner(userId) && isValidId(sessionId) && isValidId(messageId);
+        }
       }
     }
   }

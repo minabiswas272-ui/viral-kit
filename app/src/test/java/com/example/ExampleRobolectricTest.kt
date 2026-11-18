@@ -5,10 +5,14 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
@@ -21,14 +25,17 @@ import com.example.data.model.GroundingSource
 import com.example.data.model.LatestTrendAlert
 import com.example.data.model.PacingSegment
 import com.example.data.model.StrategistModel
+import com.example.data.model.StrategySession
 import com.example.data.model.TargetLanguage
 import com.example.data.model.TargetPlatform
 import com.example.data.model.TrendAlertFocus
 import com.example.data.model.TrendAlertInterval
 import com.example.data.model.TrendAlertPreferences
 import com.example.data.model.ViralGrowthKit
+import com.google.firebase.Timestamp
 import com.example.data.supabase.SupabaseConfig
 import com.example.data.supabase.SupabaseRestClient
+import com.example.export.ApkExporter
 import com.example.export.GrowthKitExporter
 import com.example.notifications.FcmPushManager
 import com.example.notifications.TrendAlertPrefsStore
@@ -486,10 +493,23 @@ class ExampleRobolectricTest {
             )
         )
 
+        val session = StrategySession(
+            id = "sess_1",
+            userId = "userA",
+            title = "Retention Dip Optimization",
+            lastMessagePreview = "Add a visual pattern interrupt and punch-in zoom at 0:04.",
+            modelId = StrategistModel.HYDROGEN.modelId,
+            language = TargetLanguage.ENGLISH.label,
+            platform = TargetPlatform.INSTAGRAM_REELS.label,
+            messageCount = 2L
+        )
+
         composeTestRule.setContent {
             ViralKitTheme {
                 StrategyChatContent(
                     chatState = StreamUiState.Success(conversation),
+                    sessionsState = StreamUiState.Success(listOf(session)),
+                    activeSession = session,
                     selectedModel = StrategistModel.HYDROGEN,
                     searchGrounding = true,
                     streamDraft = StreamingChatDraft(),
@@ -505,6 +525,8 @@ class ExampleRobolectricTest {
             }
         }
 
+        composeTestRule.onNodeWithTag("strategy_active_session_title").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Retention Dip Optimization").assertIsDisplayed()
         composeTestRule.onNodeWithTag("strategy_chat_message_list").assertIsDisplayed()
         composeTestRule.onNodeWithTag("strategy_chat_message_list")
             .performScrollToIndex(0)
@@ -519,5 +541,101 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("strategy_chat_send_button").performClick()
 
         assertEquals(listOf("Give me 2 stronger opening hooks"), sentPrompts)
+    }
+
+    @Test
+    fun `strategy chat screen displays previous firestore sessions and resumes selected session`() {
+        val selectedIds = mutableListOf<String>()
+        var newSessionClicked = 0
+        val savedSessions = listOf(
+            StrategySession(
+                id = "sess_hooks",
+                userId = "userA",
+                title = "Reels Hook Audit",
+                lastMessagePreview = "Try leading with a 0:01 pattern interrupt.",
+                modelId = StrategistModel.CARBON_THINKING.modelId,
+                language = TargetLanguage.HINGLISH.label,
+                platform = TargetPlatform.INSTAGRAM_REELS.label,
+                messageCount = 4L,
+                updatedAt = Timestamp(1_760_000_000L, 0)
+            ),
+            StrategySession(
+                id = "sess_shorts",
+                userId = "userA",
+                title = "Shorts B-Roll Sprint",
+                lastMessagePreview = "Cut every 1.8 seconds before the reveal.",
+                modelId = StrategistModel.HYDROGEN.modelId,
+                language = TargetLanguage.ENGLISH.label,
+                platform = TargetPlatform.YOUTUBE_SHORTS.label,
+                messageCount = 6L,
+                updatedAt = Timestamp(1_759_990_000L, 0)
+            )
+        )
+
+        composeTestRule.setContent {
+            ViralKitTheme {
+                StrategyChatContent(
+                    chatState = StreamUiState.Success(emptyList()),
+                    sessionsState = StreamUiState.Success(savedSessions),
+                    activeSession = null,
+                    selectedModel = StrategistModel.HYDROGEN,
+                    searchGrounding = true,
+                    streamDraft = StreamingChatDraft(),
+                    lastSearchHtml = null,
+                    language = TargetLanguage.ENGLISH,
+                    platform = TargetPlatform.INSTAGRAM_REELS,
+                    isOnline = true,
+                    onSelectModel = {},
+                    onToggleSearchGrounding = {},
+                    onSendPrompt = {},
+                    onClearHistory = {},
+                    onSelectSession = { selectedIds.add(it) },
+                    onNewSession = { newSessionClicked++ }
+                )
+            }
+        }
+
+        // Quick-resume recent session card is visible in empty state (scroll into view on compact viewports)
+        composeTestRule.onNodeWithTag("strategy_resume_recent_sess_hooks")
+            .performScrollTo()
+            .assertIsDisplayed()
+
+        // Open full Firestore sessions bottom sheet
+        composeTestRule.onNodeWithTag("strategy_sessions_button").performClick()
+        composeTestRule.onNodeWithTag("strategy_sessions_sheet").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("strategy_session_item_sess_shorts").assertIsDisplayed()
+        composeTestRule.onNode(
+            hasText("Shorts B-Roll Sprint") and hasAnyAncestor(hasTestTag("strategy_sessions_sheet"))
+        ).assertIsDisplayed()
+        composeTestRule.onNode(
+            hasText("Cut every 1.8 seconds before the reveal.") and hasAnyAncestor(hasTestTag("strategy_sessions_sheet"))
+        ).assertIsDisplayed()
+
+        // Tap a saved session to resume it
+        composeTestRule.onNodeWithTag("strategy_session_item_sess_shorts").performClick()
+        assertEquals(listOf("sess_shorts"), selectedIds)
+
+        // Tap New Session button in header
+        composeTestRule.onNodeWithTag("strategy_new_session_button").performClick()
+        assertEquals(1, newSessionClicked)
+    }
+
+    @Test
+    fun `apk exporter inspects and exports valid apk package with FileProvider URI`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sourceApk = ApkExporter.resolveSourceApkFile(context)
+        assertNotNull(sourceApk)
+        assertTrue(sourceApk!!.exists() && sourceApk.length() > 0L)
+
+        val info = ApkExporter.inspectApkPackage(context)
+        assertNotNull(info)
+        assertTrue(info!!.fileName.endsWith(".apk"))
+        assertTrue(info.sizeBytes > 0L)
+
+        val artifact = ApkExporter.exportInstalledApk(context)
+        assertTrue(artifact.file.exists())
+        assertEquals(sourceApk.length(), artifact.file.length())
+        assertEquals(ApkExporter.APK_MIME_TYPE, artifact.mimeType)
+        assertEquals("content", artifact.uri.scheme)
     }
 }

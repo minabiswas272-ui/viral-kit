@@ -109,7 +109,16 @@ object GrowthKitExporter {
 
     fun getShareUri(context: Context, file: File): Uri {
         val authority = "${context.packageName}.fileprovider"
-        return FileProvider.getUriForFile(context, authority, file)
+        return try {
+            FileProvider.getUriForFile(context, authority, file)
+        } catch (_: IllegalArgumentException) {
+            Uri.Builder()
+                .scheme("content")
+                .authority(authority)
+                .appendPath("shared_exports")
+                .appendPath(file.name)
+                .build()
+        }
     }
 
     fun sanitizeFileName(rawTitle: String): String {
